@@ -35,6 +35,8 @@
 #include "dyn_core.h"
 #include "dyn_signal.h"
 
+#include "proto/dyn_proto.h"
+
 #if defined(SYSCONFDIR)
 #define DN_CONF_PATH SYSCONFDIR "/dynomite.yml"
 #else
@@ -612,6 +614,8 @@ int main(int argc, char **argv) {
     }
     exit(0);
   }
+
+  init_cmd_info();
 
   status = dn_pre_run(&nci);
   if (status != DN_OK) {

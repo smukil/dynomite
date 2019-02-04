@@ -25,6 +25,7 @@
 
 #include <stdbool.h>
 
+#include "../dyn_message.h"
 #include "../dyn_types.h"
 
 // Forward declarations
@@ -35,6 +36,8 @@ struct rack;
 struct response_mgr;
 struct server_pool;
 struct string;
+
+void init_cmd_info();
 
 void memcache_parse_req(struct msg *r, const struct string *hash_tag);
 void memcache_parse_rsp(struct msg *r, const struct string *UNUSED);
@@ -48,6 +51,11 @@ rstatus_t memcache_verify_request(struct msg *r, struct server_pool *pool,
                                   struct rack *rack);
 rstatus_t memcache_rewrite_query(struct msg *orig_msg, struct context *ctx,
                                  bool *did_rewrite, struct msg **new_msg_ptr);
+rstatus_t memcache_rewrite_query_with_timestamp_md(struct msg *orig_msg,
+    struct context *ctx, bool *did_rewrite, struct msg **new_msg_ptr);
+rstatus_t memcache_make_repair_query(struct context *ctx, struct msg **new_msg_ptr,
+    struct conn *conn, uint64_t timestamp, uint32_t keylen, uint8_t *key,
+    uint32_t valuelen, uint8_t *value /* ,msg_type_t msg_type */);
 
 void redis_parse_req(struct msg *r, const struct string *hash_tag);
 void redis_parse_rsp(struct msg *r, const struct string *UNUSED);
@@ -61,5 +69,9 @@ rstatus_t redis_verify_request(struct msg *r, struct server_pool *pool,
                                struct rack *rack);
 rstatus_t redis_rewrite_query(struct msg *orig_msg, struct context *ctx,
                               bool *did_rewrite, struct msg **new_msg_ptr);
-
+rstatus_t redis_rewrite_query_with_timestamp_md(struct msg *orig_msg,
+    struct context *ctx, bool *did_rewrite, struct msg **new_msg_ptr);
+rstatus_t redis_make_repair_query(struct context *ctx, struct conn *conn,
+    uint64_t timestamp, uint32_t keylen, uint8_t *key, struct msg *orig_msg,
+    struct msg **new_msg_ptr);
 #endif
