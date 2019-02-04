@@ -1616,3 +1616,9 @@ rstatus_t memcache_rewrite_query(struct msg *orig_msg, struct context *ctx,
                                  bool *did_rewrite, struct msg **new_msg_ptr) {
   return DN_OK;
 }
+
+rstatus_t memcache_make_repair_query(struct context *ctx, struct msg **new_msg_ptr,
+     struct conn *conn, uint64_t timestamp, uint32_t keylen, uint8_t *key,
+     uint32_t valuelen, uint8_t *value /* ,msg_type_t msg_type */) {
+  return DN_OK;
+}

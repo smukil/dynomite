@@ -36,6 +36,13 @@
 RSP_STRING(DEFINE_ACTION)
 #undef DEFINE_ACTION
 
+// TODO: Convert to startup flag.
+#define read_repairs 1
+
+bool is_timestamp_begin(char current_ch, struct msg *r) {
+  return current_ch == '<' && r->rntokens == 0 && read_repairs == 1;
+}
+
 /*
  * Return true, if the redis command take no key, otherwise
  * return false
@@ -53,6 +60,10 @@ static bool redis_argz(struct msg *r) {
   }
 
   return false;
+}
+
+void stupid_debug_func() {
+  loga("IN STUPID DEBUG FUNC");
 }
 
 /*
@@ -375,6 +386,127 @@ rstatus_t record_arg(uint8_t* start_pos, uint8_t* end_pos, struct array *target_
   return DN_OK;
 }
 
+int count_digits(int arg) {
+    return snprintf(NULL, 0, "%d", arg) - (arg < 0);
+}
+
+rstatus_t redis_make_repair_query(struct context *ctx, struct msg **new_msg_ptr,
+    struct conn *conn, uint64_t timestamp, uint32_t keylen, uint8_t *key,
+    uint32_t valuelen, uint8_t *value
+    /* ,msg_type_t msg_type */) {
+
+  loga("In redis_make_repair_query. Biggest timestamp: %u", timestamp);
+  if (read_repairs == 0) return DN_OK;
+
+  /*
+   FMT String order:-
+    %d       %s    %s     %s     %d       %u   %d       %s   %d         %d      %d        %s
+    <keylen> <key> <+set> <-set> <ts_len> <ts> <op_len> <op> <narg_len> <nargs> <val_len> <val>
+  */
+  const char* REPAIR_WRITE_SCRIPT_FMT_STRING = "*10\r\n$4\r\nEVAL\r\n$720\r\n"
+    "local key = KEYS[1]\nlocal add_set = KEYS[2]\nlocal rem_set = KEYS[3]\n"
+    "local cur_ts = ARGV[1]\nlocal orig_op = ARGV[2]\nlocal num_orig_args = ARGV[3]\n"
+    "local arg1_for_op = ARGV[4]\n\nlocal last_seen_ts_in_add = "
+    "redis.call('ZSCORE', add_set, key)\nlocal last_seen_ts_in_rem = "
+    "redis.call('ZSCORE', rem_set, key)\nif (last_seen_ts_in_rem) "
+    "then\n  assert(not last_seen_ts_in_add)\n  if (tonumber(cur_ts) < "
+    "tonumber(last_seen_ts_in_rem)) then\n    return -1\n  end\n  "
+    "redis.call('ZREM', rem_set, key)\nelseif (last_seen_ts_in_add) then\n  "
+    "assert(not last_seen_ts_in_rem)\n  if (tonumber(cur_ts) < "
+    "tonumber(last_seen_ts_in_add)) then\n    return -1\n  end\nend\n\n"
+    "redis.call('ZADD', add_set, cur_ts, key)\n"
+    "return redis.call(orig_op, key, arg1_for_op)\n\r\n$1\r\n3\r\n"
+    "$%d\r\n%s\r\n$9\r\n%s\r\n$9\r\n%s\r\n$%d\r\n%u\r\n"
+    "$%d\r\n%s\r\n$%d\r\n%d\r\n$%d\r\n%s\r\n";
+
+  struct msg *new_msg = NULL;
+  rstatus_t ret_status = DN_OK;
+
+  msg_type_t msg_type = MSG_REQ_REDIS_SET;
+  switch(msg_type) {
+    case MSG_REQ_REDIS_SET:
+      // Get a new 'msg' structure.
+      new_msg = msg_get(conn, true, __FUNCTION__);
+      if (new_msg == NULL) {
+        ret_status = DN_ENOMEM;
+        goto error;
+      }
+
+        // TODO: Add set and remove set lens are fixed to 9 chars. Change if necessary
+        uint8_t add_set_key[10] = "._add-set";
+        uint8_t rem_set_key[10] = "._rem-set";
+        uint8_t op_str[4] = "set"; // TODO: Source from static map.
+        uint32_t num_args = 1;
+        uint8_t key_copy[10];
+        uint8_t value_copy[10];
+        strncpy((char*)key_copy, (char*)key, keylen);
+        strncpy((char*)value_copy, (char*)value, valuelen);
+        key_copy[keylen] = '\0';
+        value_copy[valuelen] = '\0';
+/*
+        uint32_t req_key_len;
+        // Get a copy of the key from 'orig_msg'.
+        uint8_t *req_key = msg_get_full_key_copy(orig_msg, 0, &req_key_len);
+        if (req_key == NULL) {
+          ret_status = DN_ENOMEM;
+          goto error;
+        }
+
+        uint32_t value_len;
+        // We'll find the value in the 0-th argument position.
+        uint8_t *value = msg_get_arg_copy(orig_msg, 0, &value_len);
+        if (value == NULL) {
+          ret_status = DN_ENOMEM;
+          goto error;
+        }
+*/
+        uint32_t timestamp_len = count_digits(timestamp);
+        uint32_t num_arg_len = count_digits(num_args);
+        // Write the new command into 'new_msg'
+        rstatus_t prepend_status = msg_prepend_format(
+            new_msg, REPAIR_WRITE_SCRIPT_FMT_STRING, keylen, key_copy, add_set_key,
+            rem_set_key, timestamp_len, timestamp,
+            strlen(op_str), op_str, num_arg_len, num_args, valuelen, value_copy);
+        if (prepend_status != DN_OK) {
+          ret_status = prepend_status;
+          goto error;
+        }
+
+        {
+          // Point the 'pos' pointer in 'new_msg' to the mbuf we've added.
+          struct mbuf *new_mbuf = STAILQ_LAST(&new_msg->mhdr, mbuf, next);
+          new_msg->pos = new_mbuf->pos;
+        }
+        // Parse the message 'new_msg' to populate all of its appropriate
+        // fields.
+        //new_msg->parser(new_msg, &ctx->pool.hash_tag);
+        struct string empty_hash_tag;
+        string_init(&empty_hash_tag);
+        new_msg->parser(new_msg, &empty_hash_tag);
+        // Check if 'new_msg' was parsed successfully.
+        if (new_msg->result != MSG_PARSE_OK) {
+          ret_status = DN_ERROR;
+          goto error;
+        }
+
+        *new_msg_ptr = new_msg;
+        goto done;
+        break;
+      default:
+        break;
+    }
+ error:
+  loga("SHIT! error while making repair msg");
+  // Return the newly allocated message back to the free message queue.
+  if (new_msg != NULL) msg_put(new_msg);
+  return ret_status;
+
+ done:
+  loga("Done with making repair msg");
+  return DN_OK;
+  
+}
+
 /*
  * Detects the query and does a rewrite if applicable.
  *
@@ -398,6 +530,77 @@ rstatus_t redis_rewrite_query(struct msg *orig_msg, struct context *ctx,
   const char *SMEMBERS_REWRITE_FMT_STRING =
       "*3\r\n$4\r\nsort\r\n$%d\r\n%s\r\n$5\r\nalpha\r\n";
 
+
+
+  /*
+
+   FMT String order:-
+    %d       %s    %s     %s     %d       %u   %d       %s   %d         %d      %d        %s
+    <keylen> <key> <+set> <-set> <ts_len> <ts> <op_len> <op> <narg_len> <nargs> <val_len> <val>
+
+  const char* REPAIR_WRITE_SCRIPT_FMT_STRING = "*10\r\n$4\r\nEVAL\r\n$720\r\nlocal add_set "
+    "= KEYS[1]\nlocal rem_set = KEYS[2]\nlocal key = KEYS[3]\nlocal cur_ts = ARGV[1]\n"
+    "local orig_op = ARGV[2]\nlocal num_orig_args = ARGV[3]\nlocal arg1_for_op = ARGV[4]"
+    "\n\nlocal last_seen_ts_in_add = redis.call('ZSCORE', add_set, key)\nlocal "
+    "last_seen_ts_in_rem = redis.call('ZSCORE', rem_set, key)\nif (last_seen_ts_in_rem) "
+    "then\n  assert(not last_seen_ts_in_add)\n  if (tonumber(cur_ts) < "
+    "tonumber(last_seen_ts_in_rem)) then\n    return -1\n  end\n  "
+    "redis.call('ZREM', rem_set, key)\nelseif (last_seen_ts_in_add) then\n  "
+    "assert(not last_seen_ts_in_rem)\n  if (tonumber(cur_ts) < "
+    "tonumber(last_seen_ts_in_add)) then\n    return -1\n  end\nend\n\n"
+    "redis.call('ZADD', add_set, cur_ts, key)\n"
+    "return redis.call(orig_op, key, arg1_for_op)\n\r\n$1\r\n3\r\n"
+    "$9\r\n._add-set\r\n$9\r\n._rem-set\r\n$9\r\ndummy_key\r\n$5\r\n12345\r\n"
+    "$3\r\nset\r\n$1\r\n1\r\n$11\r\ndummy_value\r\n";
+  */
+  const char* REPAIR_WRITE_SCRIPT_FMT_STRING = "*10\r\n$4\r\nEVAL\r\n$720\r\n"
+    "local key = KEYS[1]\nlocal add_set = KEYS[2]\nlocal rem_set = KEYS[3]\n"
+    "local cur_ts = ARGV[1]\nlocal orig_op = ARGV[2]\nlocal num_orig_args = ARGV[3]\n"
+    "local arg1_for_op = ARGV[4]\n\nlocal last_seen_ts_in_add = "
+    "redis.call('ZSCORE', add_set, key)\nlocal last_seen_ts_in_rem = "
+    "redis.call('ZSCORE', rem_set, key)\nif (last_seen_ts_in_rem) "
+    "then\n  assert(not last_seen_ts_in_add)\n  if (tonumber(cur_ts) < "
+    "tonumber(last_seen_ts_in_rem)) then\n    return -1\n  end\n  "
+    "redis.call('ZREM', rem_set, key)\nelseif (last_seen_ts_in_add) then\n  "
+    "assert(not last_seen_ts_in_rem)\n  if (tonumber(cur_ts) < "
+    "tonumber(last_seen_ts_in_add)) then\n    return -1\n  end\nend\n\n"
+    "redis.call('ZADD', add_set, cur_ts, key)\n"
+    "return redis.call(orig_op, key, arg1_for_op)\n\r\n$1\r\n3\r\n"
+    "$%d\r\n%s\r\n$9\r\n%s\r\n$9\r\n%s\r\n$%d\r\n%u\r\n"
+    "$%d\r\n%s\r\n$%d\r\n%d\r\n$%d\r\n%s\r\n";
+
+
+  /*
+    FMT String order:-
+    %d       %s    %s     %s     %d       %u   %d       %s   %d         %d
+    <keylen> <key> <+set> <-set> <ts_len> <ts> <op_len> <op> <narg_len> <nargs>
+
+    "*9\r\n$4\r\nEVAL\r\n$566\r\nlocal add_set = KEYS[1]\nlocal rem_set = KEYS[2]\n"
+    "local key = KEYS[3]\nlocal cur_ts = ARGV[1]\nlocal orig_op = ARGV[2]\n"
+    "local num_orig_args = ARGV[3]\n\nlocal last_seen_ts_in_add = "
+    "redis.call('ZSCORE', add_set, key)\nlocal last_seen_ts_in_rem = "
+    "redis.call('ZSCORE', rem_set, key)\nif (last_seen_ts_in_rem) then\n  "
+    "assert(not last_seen_ts_in_add)\n  if (tonumber(cur_ts) < "
+    "tonumber(last_seen_ts_in_rem)) then\n    return nil\n  end\nelseif "
+    "(last_seen_ts_in_add) then\n  assert(not last_seen_ts_in_rem)\nend\n\n"
+    "local value = redis.call(orig_op, key)\nreturn {last_seen_ts_in_add, value}\n\r\n"
+    "$1\r\n3\r\n$9\r\n._add-set\r\n$9\r\n._rem-set\r\n$%d\r\n%s\r\n$%d\r\n%u\r\n$d\r\n"
+    "%s\r\n$%d\r\n%d\r\n"
+
+  */
+  const char* REPAIR_READ_SCRIPT_FMT_STRING = 
+    "*9\r\n$4\r\nEVAL\r\n$566\r\nlocal key = KEYS[1]\nlocal add_set = KEYS[2]\n"
+    "local rem_set = KEYS[3]\nlocal cur_ts = ARGV[1]\nlocal orig_op = ARGV[2]\n"
+    "local num_orig_args = ARGV[3]\n\nlocal last_seen_ts_in_add = "
+    "redis.call('ZSCORE', add_set, key)\nlocal last_seen_ts_in_rem = "
+    "redis.call('ZSCORE', rem_set, key)\nif (last_seen_ts_in_rem) then\n  "
+    "assert(not last_seen_ts_in_add)\n  if (tonumber(cur_ts) < "
+    "tonumber(last_seen_ts_in_rem)) then\n    return nil\n  end\nelseif "
+    "(last_seen_ts_in_add) then\n  assert(not last_seen_ts_in_rem)\nend\n\n"
+    "local value = redis.call(orig_op, key)\nreturn {value, last_seen_ts_in_add}\n\r\n"
+    "$1\r\n3\r\n$%d\r\n%s\r\n$9\r\n%s\r\n$9\r\n%s\r\n$%d\r\n%u\r\n$%d\r\n"
+    "%s\r\n$%d\r\n%d\r\n";
+
   ASSERT(orig_msg != NULL);
   ASSERT(orig_msg->is_request);
   ASSERT(did_rewrite != NULL);
@@ -407,6 +610,133 @@ rstatus_t redis_rewrite_query(struct msg *orig_msg, struct context *ctx,
   struct msg *new_msg = NULL;
   uint8_t *key = NULL;
   rstatus_t ret_status = DN_OK;
+
+  if (read_repairs == 1 && orig_msg->is_read == 0) {
+    switch(orig_msg->type) {
+      case MSG_REQ_REDIS_SET:
+        loga("Rewriting SET query");
+        // Get a new 'msg' structure.
+        new_msg = msg_get(orig_msg->owner, true, __FUNCTION__);
+        if (new_msg == NULL) {
+          ret_status = DN_ENOMEM;
+          goto error;
+        }
+
+        // TODO: Add set and remove set lens are fixed to 9 chars. Change if necessary
+        uint8_t add_set_key[10] = "._add-set";
+        uint8_t rem_set_key[10] = "._rem-set";
+        uint8_t op_str[4] = "set"; // TODO: Source from static map.
+        uint32_t num_args = 1;
+
+        uint32_t req_key_len;
+        // Get a copy of the key from 'orig_msg'.
+        uint8_t *req_key = msg_get_full_key_copy(orig_msg, 0, &req_key_len);
+        if (req_key == NULL) {
+          ret_status = DN_ENOMEM;
+          goto error;
+        }
+
+        uint32_t value_len;
+        // We'll find the value in the 0-th argument position.
+        uint8_t *value = msg_get_arg_copy(orig_msg, 0, &value_len);
+        if (value == NULL) {
+          ret_status = DN_ENOMEM;
+          goto error;
+        }
+
+        uint32_t timestamp_len = count_digits(orig_msg->timestamp);
+        uint32_t num_arg_len = count_digits(num_args);
+        // Write the new command into 'new_msg'
+        rstatus_t prepend_status = msg_prepend_format(
+            new_msg, REPAIR_WRITE_SCRIPT_FMT_STRING, req_key_len, req_key, add_set_key,
+            rem_set_key, timestamp_len, orig_msg->timestamp,
+            strlen(op_str), op_str, num_arg_len, num_args, value_len, value);
+        if (prepend_status != DN_OK) {
+          ret_status = prepend_status;
+          goto error;
+        }
+
+        {
+          // Point the 'pos' pointer in 'new_msg' to the mbuf we've added.
+          struct mbuf *new_mbuf = STAILQ_LAST(&new_msg->mhdr, mbuf, next);
+          new_msg->pos = new_mbuf->pos;
+        }
+        // Parse the message 'new_msg' to populate all of its appropriate
+        // fields.
+        new_msg->parser(new_msg, &ctx->pool.hash_tag);
+        // Check if 'new_msg' was parsed successfully.
+        if (new_msg->result != MSG_PARSE_OK) {
+          ret_status = DN_ERROR;
+          goto error;
+        }
+
+        *new_msg_ptr = new_msg;
+        *did_rewrite = true;
+        goto done;
+        break;
+      default:
+        break;
+    }
+  } else if (read_repairs == 1 && orig_msg->is_read == 1) {
+    switch(orig_msg->type) {
+      case MSG_REQ_REDIS_GET:
+        loga("Rewriting GET query");
+        // Get a new 'msg' structure.
+        new_msg = msg_get(orig_msg->owner, true, __FUNCTION__);
+        if (new_msg == NULL) {
+          ret_status = DN_ENOMEM;
+          goto error;
+        }
+
+        // TODO: Add set and remove set lens are fixed to 9 chars. Change if necessary
+        uint8_t add_set_key[10] = "._add-set";
+        uint8_t rem_set_key[10] = "._rem-set";
+        uint8_t op_str[4] = "get"; // TODO: Source from static map.
+        uint32_t num_args = 0;
+
+        uint32_t req_key_len;
+        // Get a copy of the key from 'orig_msg'.
+        uint8_t *req_key = msg_get_full_key_copy(orig_msg, 0, &req_key_len);
+        if (req_key == NULL) {
+          ret_status = DN_ENOMEM;
+          goto error;
+        }
+
+        uint32_t timestamp_len = count_digits(orig_msg->timestamp);
+        uint32_t num_arg_len = count_digits(num_args);
+        // Write the new command into 'new_msg'
+        rstatus_t prepend_status = msg_prepend_format(
+            new_msg, REPAIR_READ_SCRIPT_FMT_STRING, req_key_len, req_key, add_set_key,
+            rem_set_key, timestamp_len, orig_msg->timestamp,
+            strlen(op_str), op_str, num_arg_len, num_args);
+        if (prepend_status != DN_OK) {
+          ret_status = prepend_status;
+          goto error;
+        }
+
+        {
+          // Point the 'pos' pointer in 'new_msg' to the mbuf we've added.
+          struct mbuf *new_mbuf = STAILQ_LAST(&new_msg->mhdr, mbuf, next);
+          new_msg->pos = new_mbuf->pos;
+        }
+        // Parse the message 'new_msg' to populate all of its appropriate
+        // fields.
+        new_msg->parser(new_msg, &ctx->pool.hash_tag);
+        // Check if 'new_msg' was parsed successfully.
+        if (new_msg->result != MSG_PARSE_OK) {
+          ret_status = DN_ERROR;
+          goto error;
+        }
+
+        *new_msg_ptr = new_msg;
+        *did_rewrite = true;
+        goto done;
+        break;
+      default:
+        break;
+    }
+  }
+
   switch (orig_msg->type) {
     case MSG_REQ_REDIS_SMEMBERS:
 
@@ -461,12 +791,14 @@ rstatus_t redis_rewrite_query(struct msg *orig_msg, struct context *ctx,
   }
 
 error:
+  loga("SHIT! error");
   if (key != NULL) dn_free(key);
   // Return the newly allocated message back to the free message queue.
   if (new_msg != NULL) msg_put(new_msg);
   return ret_status;
 
 done:
+  loga("Done with query rewrite");
   if (key != NULL) dn_free(key);
   return DN_OK;
 }
@@ -529,6 +861,11 @@ void redis_parse_req(struct msg *r, const struct string *hash_tag) {
     SW_ARGN_LEN_LF,
     SW_ARGN,
     SW_ARGN_LF,
+    SW_TIMESTAMP_LEN,
+    SW_TIMESTAMP_LEN_LF,
+    SW_TIMESTAMP,
+    SW_TIMESTAMP_CR,
+    SW_TIMESTAMP_LF,
     SW_FRAGMENT,
     SW_INLINE_PING,
     SW_SENTINEL
@@ -1817,6 +2154,11 @@ void redis_parse_req(struct msg *r, const struct string *hash_tag) {
       case SW_ARG1_LF:
         switch (ch) {
           case LF:
+            if (r->rntokens == 1 && read_repairs == 1 && r->is_read == 0 &&
+                r->type != MSG_REQ_REDIS_EVAL) {
+              state = SW_TIMESTAMP_LEN;
+              break;
+            }
             if (redis_arg_upto1(r) || redis_arg1(r)) {
               if (r->rntokens != 0) {
                 goto error;
@@ -1970,6 +2312,11 @@ void redis_parse_req(struct msg *r, const struct string *hash_tag) {
       case SW_ARG2_LF:
         switch (ch) {
           case LF:
+            if (r->rntokens == 1 && read_repairs == 1 && r->is_read == 0 &&
+                r->type != MSG_REQ_REDIS_EVAL) {
+              state = SW_TIMESTAMP_LEN;
+              break;
+            }
             if (redis_arg2(r)) {
               if (r->rntokens != 0) {
                 goto error;
@@ -2067,6 +2414,11 @@ void redis_parse_req(struct msg *r, const struct string *hash_tag) {
       case SW_ARG3_LF:
         switch (ch) {
           case LF:
+            if (r->rntokens == 1 && read_repairs == 1 && r->is_read == 0 &&
+                r->type != MSG_REQ_REDIS_EVAL) {
+              state = SW_TIMESTAMP_LEN;
+              break;
+            }
             if (redis_arg3(r)) {
               if (r->rntokens != 0) {
                 goto error;
@@ -2154,6 +2506,12 @@ void redis_parse_req(struct msg *r, const struct string *hash_tag) {
       case SW_ARGN_LF:
         switch (ch) {
           case LF:
+            // If read repairs are enabled and it's a write, check for timestamps.
+            if (r->rntokens == 1 && read_repairs == 1 && r->is_read == 0 &&
+                r->type != MSG_REQ_REDIS_EVAL) {
+              state = SW_TIMESTAMP_LEN;
+              break;
+            }
             if (redis_argn(r) || redis_argeval(r)) {
               if (r->rntokens == 0) {
                 goto done;
@@ -2169,6 +2527,77 @@ void redis_parse_req(struct msg *r, const struct string *hash_tag) {
             goto error;
         }
 
+        break;
+
+      case SW_TIMESTAMP_LEN:
+        if (r->token == NULL) {
+          if (ch != '$') {
+            goto error;
+          }
+          r->rlen = 0;
+          r->token = p;
+        } else if (isdigit(ch)) {
+          r->rlen = r->rlen * 10 + (uint32_t)(ch - '0');
+        } else if (ch == CR) {
+          if ((p - r->token) <= 1 || r->rntokens == 0) {
+            goto error;
+          }
+          r->rntokens--;
+          r->token = NULL;
+          state = SW_TIMESTAMP_LEN_LF;
+        } else {
+          goto error;
+        }
+
+        break;
+
+      case SW_TIMESTAMP_LEN_LF:
+        switch (ch) {
+          case LF:
+            state = SW_TIMESTAMP;
+            break;
+
+          default:
+            goto error;
+        }
+
+        break;
+      case SW_TIMESTAMP:
+        ASSERT(read_repairs == 1);
+        if (isdigit(ch)) {
+          r->timestamp = r->timestamp * 10 + (uint64_t)(ch - '0');
+        } else if (ch == '>') {
+          if (r->rlen > 2 || r->rntokens != 0) {
+            goto error;
+          }
+          state = SW_TIMESTAMP_CR;
+        } else if (ch != '<') {
+          // The first character is always '<', so don't count that as an error.
+          goto error;
+        }
+
+        --r->rlen;
+        break;
+
+      case SW_TIMESTAMP_CR:
+          if (ch != CR) {
+            goto error;
+          }
+        state = SW_TIMESTAMP_LF;
+        break;
+
+      case SW_TIMESTAMP_LF:
+        switch (ch) {
+          case LF:
+            if (r->rntokens != 0) {
+              goto error;
+            }
+            // Reduce the number of args to not account for the timestamp as an arg.
+            r->ntokens = r->ntokens - 1;
+            goto done;
+          default:
+            goto error;
+        }
         break;
 
       case SW_SENTINEL:
@@ -2206,6 +2635,7 @@ done:
   r->token = NULL;
   r->result = MSG_PARSE_OK;
 
+  loga("TIMESTAMP IS: %u", r->timestamp);
   log_hexdump(LOG_VERB, b->pos, mbuf_length(b),
               "parsed req %" PRIu64
               " res %d "
@@ -2738,6 +3168,15 @@ void redis_parse_rsp(struct msg *r, const struct string *UNUSED) {
           goto error;
         }
 
+        {
+          rstatus_t argstatus = record_arg(p , m , r->args);
+          if (argstatus == DN_ERROR) {
+            goto error;
+          } else if (argstatus == DN_ENOMEM) {
+            goto enomem;
+          }
+        }
+
         p += r->rlen; /* move forward by rlen bytes */
         r->rlen = 0;
 
@@ -2798,12 +3237,36 @@ done:
   r->result = MSG_PARSE_OK;
   r->is_error = redis_error(r);
 
+  if (read_repairs == 1 && r->type == MSG_RSP_REDIS_MULTIBULK) {
+    // Record the timestamp which will be present in the last position in 'args'.
+    uint32_t num_args = array_n(r->args);
+    if (num_args >= 1) {
+      struct argpos* timestamp_str_arg = array_get(r->args, num_args - 1);
+      ASSERT(timestamp_str_arg);
+      uint8_t *i;
+      for (i = timestamp_str_arg->start; i < timestamp_str_arg->end; ++i) {
+        char ch = *i;
+        ASSERT(isdigit(ch));
+        r->timestamp = r->timestamp * 10 + (uint64_t)(ch - '0');
+      }
+    }
+  }
   log_hexdump(LOG_VERB, b->pos, mbuf_length(b),
               "parsed rsp %" PRIu64
               " res %d "
               "type %d state %d rpos %d of %d",
               r->id, r->result, r->type, r->state, r->pos - b->pos,
               b->last - b->pos);
+  return;
+
+enomem:
+  r->result = MSG_PARSE_ERROR;
+  r->state = state;
+  log_hexdump(LOG_ERR, b->pos, mbuf_length(b),
+              "out of memory on parse req %" PRIu64
+              " "
+              "res %d type %d state %d",
+              r->id, r->result, r->type, r->state);
   return;
 
 error:

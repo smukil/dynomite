@@ -45,13 +45,18 @@ typedef rstatus_t (*func_msg_fragment_t)(struct msg *, struct server_pool *,
 typedef rstatus_t (*func_msg_verify_t)(struct msg *, struct server_pool *,
                                        struct rack *);
 typedef void (*func_msg_coalesce_t)(struct msg *r);
-typedef rstatus_t (*msg_response_handler_t)(struct msg *req, struct msg *rsp);
+typedef rstatus_t (*msg_response_handler_t)(struct context *ctx, struct msg *req,
+                                            struct msg *rsp);
 typedef bool (*func_msg_failure_t)(struct msg *r);
 typedef bool (*func_is_multikey_request)(struct msg *r);
 typedef struct msg *(*func_reconcile_responses)(struct response_mgr *rspmgr);
 typedef rstatus_t (*func_msg_rewrite_t)(struct msg *orig_msg,
                                         struct context *ctx, bool *did_rewrite,
                                         struct msg **new_msg_ptr);
+typedef rstatus_t (*func_msg_repair_t)(struct context *ctx, struct msg **new_msg_ptr,
+    struct conn* conn, uint64_t timestamp, uint32_t keylen, uint8_t *key,
+    uint32_t valuelen, uint8_t *value
+    /* ,msg_type_t msg_type */);
 
 extern func_msg_coalesce_t g_pre_coalesce;  /* message pre-coalesce */
 extern func_msg_coalesce_t g_post_coalesce; /* message post-coalesce */
@@ -61,6 +66,7 @@ extern func_is_multikey_request g_is_multikey_request;
 extern func_reconcile_responses g_reconcile_responses;
 extern func_msg_rewrite_t
     g_rewrite_query; /* rewrite query in a msg if necessary */
+extern func_msg_repair_t g_make_repair_query; /* Create a repair msg. */
 
 void set_datastore_ops(void);
 
@@ -455,6 +461,7 @@ struct msg {
    * destination */
   unsigned dnode_header_prepended : 1;
   unsigned rsp_sent : 1; /* is a response sent for this request?*/
+  uint64_t timestamp;   // Timestamp of request. Used only if 'read_repiars' is enabled.
 
   // dynomite
   struct dmsg *dmsg; /* dyn message */
@@ -481,8 +488,8 @@ static inline void msg_decr_awaiting_rsps(struct msg *req) {
   return;
 }
 
-static inline rstatus_t msg_handle_response(struct msg *req, struct msg *rsp) {
-  return req->rsp_handler(req, rsp);
+static inline rstatus_t msg_handle_response(struct context *ctx, struct msg *req, struct msg *rsp) {
+  return req->rsp_handler(ctx, req, rsp);
 }
 
 size_t msg_free_queue_size(void);
@@ -519,6 +526,7 @@ uint8_t *msg_get_tagged_key(struct msg *req, uint32_t key_index,
 uint8_t *msg_get_full_key(struct msg *req, uint32_t key_index,
                           uint32_t *keylen);
 uint8_t *msg_get_full_key_copy(struct msg *msg, int idx, uint32_t *keylen);
+uint8_t *msg_get_arg_copy(struct msg *msg, int idx, uint32_t *arglen);
 
 struct msg *req_get(struct conn *conn);
 void req_put(struct msg *msg);
