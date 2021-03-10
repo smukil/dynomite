@@ -22,7 +22,7 @@ AM_CFLAGS += -Wstrict-prototypes -Wmissing-prototypes -Wredundant-decls -Wmissin
 
 AM_LDFLAGS =
 AM_LDFLAGS += -lm -lpthread -rdynamic
-AM_LDFLAGS += -lssl -lcrypto
+AM_LDFLAGS += -lssl -lcrypto -lrdkafka
 
 if OS_SOLARIS
 AM_LDFLAGS += -lnsl -lsocket
@@ -50,6 +50,7 @@ dynomite_SOURCES =			                          \
         dyn_dnode_request.c                                       \
         dyn_dnode_proxy.c dyn_dnode_proxy.h                       \
         dyn_histogram.c dyn_histogram.h                           \
+				dyn_kafka.c dyn_kafka.h																		\
         dyn_proxy.c dyn_proxy.h		                          \
         dyn_message.c dyn_message.h	                          \
         dyn_request.c dyn_response_mgr.c	                  \
@@ -97,6 +98,7 @@ dynomite_test_SOURCES =                                           \
         dyn_dnode_request.c                                       \
         dyn_dnode_proxy.c dyn_dnode_proxy.h                       \
         dyn_histogram.c dyn_histogram.h                           \
+				dyn_kafka.c dyn_kafka.h																		\
         dyn_server.c dyn_server.h                                 \
         dyn_proxy.c dyn_proxy.h                                   \
         dyn_message.c dyn_message.h                               \

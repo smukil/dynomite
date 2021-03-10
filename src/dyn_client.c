@@ -46,6 +46,7 @@
 #include "dyn_core.h"
 #include "dyn_dict_msg_id.h"
 #include "dyn_dnode_peer.h"
+#include "dyn_kafka.h"
 #include "dyn_server.h"
 #include "dyn_util.h"
 
@@ -690,8 +691,7 @@ rstatus_t req_forward_to_peer(struct context *ctx, struct conn *c_conn,
   return status;
 
  error:
-  // Forward errors only if we failed to talk to the same DC. We currently ignore cross-DC
-  // errors.
+  // Forward errors if we failed to talk to the same DC.
   if (same_dc) {
     // We forward the error if the target was in the same rack, or if it was in a remote
     // rack and we're expecting a quorum response.
@@ -706,6 +706,17 @@ rstatus_t req_forward_to_peer(struct context *ctx, struct conn *c_conn,
       req->rspmgr.max_responses--;
       log_error("Swallowing cross rack error due to DC_ONE. Error: %d '%s'",
           status, dyn_error_source(*dyn_error_code));
+    }
+  } else {
+    // If this msg was meant for another datacenter, fallback to our
+    // kafka replication strategy.
+    const char* test_topic = "test-topic";
+    char* dummy_payload = "dummy_payload";
+    size_t len = 13;
+    rstatus_t kstatus = produce_crr_msg(test_topic, dummy_payload, len);
+    if (kstatus != DN_OK) {
+      log_error("Failed to enqueue CRR msg to kafka");
+      // TODO: Don't ignore this error ^.
     }
   }
   // Release the copy if we made one above..

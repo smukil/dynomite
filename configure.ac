@@ -200,6 +200,10 @@ AC_CONFIG_COMMANDS_PRE([tar xvfz contrib/yaml-0.1.4.tar.gz -C contrib])
 # Call yaml-0.1.4 ./configure recursively
 AC_CONFIG_SUBDIRS([contrib/yaml-0.1.4])
 
+# Call librdkafka-1.6.0 ./configure recursively
+#AC_CONFIG_SUBDIRS([contrib/librdkafka-1.6.0])
+#AX_SUBDIRS_CONFIGURE([contrib/librdkafka-1.6.0], [], [], [], [])
+
 # Define Makefiles
 AC_CONFIG_FILES([Makefile
                  contrib/Makefile

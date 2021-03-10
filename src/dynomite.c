@@ -34,6 +34,7 @@
 #include "dyn_conf.h"
 #include "dyn_core.h"
 #include "dyn_signal.h"
+#include "dyn_kafka.h"
 
 #include "proto/dyn_proto.h"
 
